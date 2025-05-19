@@ -1,351 +1,390 @@
 #!/usr/bin/env python3
-"""
-XVG File Plotter - A utility to visualize GROMACS .xvg files
 
-Usage:
-    python xvg_plotter.py --input path/to/file1.xvg [path/to/file2.xvg ...] [--noline] [--gaussian] [--no-show] [--output filename.png]
-"""
-
-import sys
-import re
-import matplotlib.pyplot as plt
-import numpy as np
 import argparse
+import subprocess
+import numpy as np
+import matplotlib.pyplot as plt
 from pathlib import Path
-from scipy import stats
+import sys
+import itertools # For color cycling
+import urllib.request
 
-def parse_xvg_file(filepath):
-    """
-    Parse an XVG file and extract data and metadata.
-    Handles lines with trailing non-numeric text (e.g., Ramachandran plots).
+# --- Utility and Data Handling Functions --- (Same as V8)
 
-    Args:
-        filepath: Path to the .xvg file
+def download_pdb_file(pdb_id, pdb_dir="."):
+    pdb_dir_path = Path(pdb_dir)
+    pdb_dir_path.mkdir(parents=True, exist_ok=True)
+    pdb_file = pdb_dir_path / f"{pdb_id.lower()}.pdb"
+    
+    if pdb_file.exists():
+        print(f"PDB file {pdb_file} already exists.")
+        return pdb_file
 
-    Returns:
-        tuple: (data_array, y_legends, title, xlabel, ylabel, filename_stem)
-               y_legends is a list of legends for the Y-axes.
-    """
-    filepath_obj = Path(filepath)
-    filename_stem = filepath_obj.stem
-    with open(filepath_obj, 'r') as f:
-        lines = f.readlines()
+    print(f"Attempting to download {pdb_id.upper()}.pdb to {pdb_file}...")
+    try:
+        url = f"https://files.rcsb.org/download/{pdb_id.upper()}.pdb"
+        urllib.request.urlretrieve(url, pdb_file)
+        print(f"Successfully downloaded {pdb_file}")
+        return pdb_file
+    except Exception as e:
+        print(f"Error: Could not download PDB file {pdb_id}.pdb: {e}", file=sys.stderr)
+        print(f"Please ensure {pdb_id.lower()}.pdb is manually placed in {pdb_dir_path} or check internet connection.", file=sys.stderr)
+        return None
 
-    raw_data = []
-    y_legends_dict = {}
-    title = "GROMACS Data"
-    xlabel = "X-axis" # Default X-axis label
-    ylabel = "Y-axis" # Default Y-axis label
+def get_bfactors(pdb_id, chain_id, awk_script_path_str, pdb_download_dir="."):
+    pdb_file_path = download_pdb_file(pdb_id, pdb_download_dir)
+    if not pdb_file_path:
+        return None, None
 
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+    awk_script_path = Path(awk_script_path_str)
+    if not awk_script_path.exists():
+        print(f"Error: AWK script not found at {awk_script_path}", file=sys.stderr)
+        return None, None
 
-        if line.startswith('@'):
-            if line.startswith('@    title'):
-                title = line.split('"')[1] if '"' in line else line.split()[-1]
-            elif line.startswith('@    xaxis  label'):
-                xlabel = line.split('"')[1] if '"' in line else line.split()[-1]
-            elif line.startswith('@    yaxis  label'):
-                ylabel = line.split('"')[1] if '"' in line else line.split()[-1]
-            else:
-                legend_match = re.match(r'@\s+s(\d+)\s+legend\s+"([^"]+)"', line)
-                if legend_match:
-                    s_index = int(legend_match.group(1))
-                    legend_text = legend_match.group(2)
-                    y_legends_dict[s_index] = legend_text
-        elif not line.startswith('#'):
-            parts = line.split()
-            numeric_values_for_line = []
-            for part in parts:
+    cmd = [
+        "awk",
+        "-v", f"TARGET_CHAIN={chain_id}",
+        "-f", str(awk_script_path),
+        str(pdb_file_path)
+    ]
+    try:
+        # print(f"Executing: {' '.join(cmd)}") # Can be verbose
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=120)
+        output = result.stdout.strip()
+
+        if not output:
+            print(f"Warning: No B-factor data extracted for PDB {pdb_id}, chain {chain_id}.")
+            return np.array([]), np.array([])
+
+        data = np.array([line.split() for line in output.splitlines() if line.strip()], dtype=float)
+        
+        if data.size == 0 or data.ndim != 2 or data.shape[1] != 2:
+            print(f"Warning: B-factor data for {pdb_id} chain {chain_id} is empty or not in expected 2-column format.")
+            return np.array([]), np.array([])
+            
+        # print(f"Successfully extracted {data.shape[0]} B-factors for {pdb_id} chain {chain_id}.")
+        return data[:, 0].astype(int), data[:, 1]
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing AWK script for {pdb_id} chain {chain_id}: {e}", file=sys.stderr)
+        print(f"AWK stderr: {e.stderr}", file=sys.stderr)
+        return None, None
+    except subprocess.TimeoutExpired:
+        print(f"Timeout executing AWK script for {pdb_id} chain {chain_id}.", file=sys.stderr)
+        return None, None
+    except Exception as e:
+        print(f"An unexpected error occurred in get_bfactors for {pdb_id} chain {chain_id}: {e}", file=sys.stderr)
+        return None, None
+
+def parse_residue_map_rmp(map_file_path_str):
+    mapping = {}
+    map_file_path = Path(map_file_path_str)
+    if not map_file_path.exists():
+        print(f"Error: Residue map file not found: {map_file_path}", file=sys.stderr)
+        return None # Return None if file not found
+    
+    try:
+        with open(map_file_path, 'r') as f:
+            for line_num, line in enumerate(f, 1):
+                parts = line.strip().split()
+                if not parts or line.startswith("#"):
+                    continue
+                if len(parts) == 3: 
+                    try:
+                        pdb_res_num = int(parts[1]) 
+                        sim_res_num = int(parts[2]) 
+                        mapping[pdb_res_num] = sim_res_num
+                    except ValueError:
+                        print(f"Warning: Skipping malformed numeric data in map file {map_file_path} at line {line_num}: {line.strip()}")
+                else:
+                    print(f"Warning: Skipping malformed line (expected 3 columns, got {len(parts)}) in map file {map_file_path} at line {line_num}: {line.strip()}")
+    except Exception as e:
+        print(f"Error reading or parsing residue map file {map_file_path}: {e}", file=sys.stderr)
+        return None # Return None on other errors
+    
+    if not mapping:
+        print(f"Warning: No valid mappings found in {map_file_path}.")
+    else:
+        print(f"Successfully parsed {len(mapping)} mappings from {map_file_path}.")
+    return mapping
+
+def read_xvg(filename, x_col=0, y_col=1):
+    x_data, y_data = [], []
+    title, xlabel, ylabel = Path(filename).stem, "X-axis", "Y-axis"
+    
+    try:
+        with open(filename, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('@'):
+                    parts = line.split('"')
+                    if "title" in line and len(parts) > 1: title = parts[1]
+                    if "xaxis  label" in line and len(parts) > 1: xlabel = parts[1]
+                    if "yaxis  label" in line and len(parts) > 1: ylabel = parts[1]
+                    continue
+                if line.startswith('#') or not line:
+                    continue
+                
+                cols = line.split()
                 try:
-                    numeric_values_for_line.append(float(part))
-                except ValueError:
-                    break
-            if numeric_values_for_line:
-                raw_data.append(numeric_values_for_line)
+                    x_data.append(float(cols[x_col]))
+                    y_data.append(float(cols[y_col]))
+                except (IndexError, ValueError):
+                    print(f"Warning: Skipping malformed data line in {filename}: {line}")
+                    continue
+        
+        if not x_data or not y_data:
+             print(f"Error: No data columns could be read from {filename}.", file=sys.stderr)
+             return None, None, title, xlabel, ylabel
 
-    if not raw_data:
-        print(f"Warning: No data lines found or parsed successfully in {filepath}.")
-        return np.array([]), [], title, xlabel, ylabel, filename_stem
+        return np.array(x_data), np.array(y_data), title, xlabel, ylabel
+    except FileNotFoundError:
+        print(f"Error: XVG file not found: {filename}", file=sys.stderr)
+        return None, None, title, xlabel, ylabel
+    except Exception as e:
+        print(f"Error reading XVG file {filename}: {e}", file=sys.stderr)
+        return None, None, title, xlabel, ylabel
 
-    num_cols_first_row = len(raw_data[0])
-    consistent_raw_data = [row for row in raw_data if len(row) == num_cols_first_row]
-    if len(consistent_raw_data) != len(raw_data):
-        print(f"Warning: Some data lines in {filepath} had an inconsistent number of numeric columns. "
-              f"Using {len(consistent_raw_data)} rows out of {len(raw_data)} that matched the first row's column count ({num_cols_first_row}).")
-    raw_data = consistent_raw_data
-
-    if not raw_data:
-        print(f"Warning: No consistent data lines found after filtering for column consistency in {filepath}.")
-        return np.array([]), [], title, xlabel, ylabel, filename_stem
-
-    data_array = np.array(raw_data)
-
-    final_y_legends = []
-    if data_array.ndim == 2 and data_array.shape[1] > 1:
-        for y_col_idx_in_data in range(1, data_array.shape[1]): # For XVG, data usually starts with X, then Y1, Y2...
-            legend_key_for_dict = y_col_idx_in_data - 1 # s0 usually corresponds to the first Y column
-            fallback_legend_name = f"Y-Col {y_col_idx_in_data} (s{legend_key_for_dict})"
-            final_y_legends.append(y_legends_dict.get(legend_key_for_dict, fallback_legend_name))
-    elif data_array.ndim == 1 and data_array.size > 0 : # Should not happen for typical XVG with X, Y data
-        print(f"Warning: Data in {filepath} is 1D after parsing. Shape: {data_array.shape}. Cannot plot as X,Y.")
-        return np.array([]), [], title, xlabel, ylabel, filename_stem
-    elif data_array.size == 0 :
-        print(f"Warning: No valid data points resulted after parsing {filepath}. Final data_array shape: {data_array.shape}")
-        return np.array([]), [], title, xlabel, ylabel, filename_stem
-    
-    if not final_y_legends and data_array.ndim == 2 and data_array.shape[1] > 1: # if no s_legends, create one for the first Y column
-        final_y_legends.append(f"{filename_stem} Y-data")
-
-
-    return data_array, final_y_legends, title, xlabel, ylabel, filename_stem
-
-def analyze_gaussian(data_column):
-    if len(data_column) < 2:
-        return ({'mu': np.nan, 'sigma': np.nan},
-                {'mu': np.nan, 'sigma': np.nan},
-                {'mu': np.nan, 'sigma': np.nan})
-    mid_point = len(data_column) // 2
-    first_half = data_column[:mid_point] if mid_point > 0 else np.array([])
-    second_half = data_column[mid_point:] if mid_point > 0 else np.array([])
-    mu1, sigma1 = stats.norm.fit(first_half) if len(first_half) > 1 else (np.nan, np.nan)
-    mu2, sigma2 = stats.norm.fit(second_half) if len(second_half) > 1 else (np.nan, np.nan)
-    mu_total, sigma_total = stats.norm.fit(data_column) if len(data_column) > 1 else (np.nan, np.nan)
-    return ({'mu': mu1, 'sigma': sigma1}, {'mu': mu2, 'sigma': sigma2}, {'mu': mu_total, 'sigma': sigma_total})
-
-def plot_with_gaussian(data, y_legends, title, xlabel, ylabel, input_filename_stem):
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=False, height_ratios=[2, 1])
-    for y_col_idx in range(1, data.shape[1]):
-        legend_idx = y_col_idx - 1
-        legend_label = y_legends[legend_idx] if legend_idx < len(y_legends) else f"Y-Col {y_col_idx}"
-        ax1.plot(data[:, 0], data[:, y_col_idx], label=legend_label)
-    ax1.set_xlabel(xlabel)
-    ax1.set_ylabel(ylabel)
-    ax1.set_title(f"{title} ({input_filename_stem}) - Time Series")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    for y_col_idx in range(1, data.shape[1]):
-        column_data = data[:, y_col_idx]
-        legend_idx = y_col_idx - 1
-        legend_label = y_legends[legend_idx] if legend_idx < len(y_legends) else f"Y-Col {y_col_idx}"
-        if len(column_data) < 2: continue
-        stats_first, stats_second, stats_total = analyze_gaussian(column_data)
-        ax2.hist(column_data, bins=50, density=True, alpha=0.3, label=f'Dist: {legend_label}')
-        min_val, max_val = np.min(column_data), np.max(column_data)
-        x_smooth = np.linspace(min_val, max_val, 200) if min_val != max_val else np.array([min_val])
-        if x_smooth.size > 0:
-            if not np.isnan(stats_first['mu']) and not np.isnan(stats_first['sigma']) and stats_first['sigma'] > 1e-6:
-                 ax2.plot(x_smooth, stats.norm.pdf(x_smooth, stats_first['mu'], stats_first['sigma']), '--',
-                         label=f'{legend_label} First Half (μ={stats_first["mu"]:.2f}, σ={stats_first["sigma"]:.2f})')
-            if not np.isnan(stats_second['mu']) and not np.isnan(stats_second['sigma']) and stats_second['sigma'] > 1e-6:
-                ax2.plot(x_smooth, stats.norm.pdf(x_smooth, stats_second['mu'], stats_second['sigma']), ':',
-                         label=f'{legend_label} Second Half (μ={stats_second["mu"]:.2f}, σ={stats_second["sigma"]:.2f})')
-    ax2.set_xlabel(ylabel) # X-axis of histogram is the value from Y-axis of top plot
-    ax2.set_ylabel('Probability Density')
-    ax2.set_title('Distribution Analysis')
-    ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small')
-    ax2.grid(True, alpha=0.3)
-    plt.tight_layout(rect=[0, 0, 0.9, 1])
-    return fig
-
-def plot_ramachandran(data, title, xlabel, ylabel, input_filename_path, output_path=None, no_show=False):
-    if data.shape[1] < 2: # Need at least Phi and Psi columns
-        print(f"Error: Ramachandran plot requires at least 2 data columns (e.g., Phi, Psi), got {data.shape[1]}. Skipping {input_filename_path.name}")
-        return
-    # Assuming first column is phi, second is psi if more than 2 cols (e.g. X, phi, psi)
-    # Or if just 2 cols, then they are phi, psi
-    phi_idx, psi_idx = (0, 1) if data.shape[1] == 2 else (data.shape[1]-2, data.shape[1]-1) # Heuristic: take last two if more than 2
-    if "phi" in xlabel.lower() and "psi" in ylabel.lower() and data.shape[1] > 2: # If labels are explicit and there's an X col
-         phi_idx, psi_idx = 0, 1 # If xvg has x, phi, psi, but labels are for phi, psi
-    
-    # If data has 3 columns (time, phi, psi), use last two. If 2 (phi, psi) use those.
-    col_offset = 1 if data.shape[1] > 2 else 0 # If there's a time/index column
-    phi_angles = data[:, col_offset]
-    psi_angles = data[:, col_offset+1]
-
-    plt.figure(figsize=(8, 7))
-    final_xlabel = xlabel if "phi" in xlabel.lower() else "phi (degrees)"
-    final_ylabel = ylabel if "psi" in ylabel.lower() else "psi (degrees)"
-    
-    counts, xedges, yedges, im = plt.hist2d(phi_angles, psi_angles, bins=120, cmap='viridis', cmin=1, range=[[-180, 180], [-180, 180]])
-    plt.colorbar(im, label='Density', shrink=0.8)
-    plt.xlabel(final_xlabel)
-    plt.ylabel(final_ylabel)
-    plot_title = f"Ramachandran Plot: {input_filename_path.name}"
-    if title and title != "GROMACS Data" and "Ramachandran" not in title : # Use file's title if more specific
-        plot_title = f"{title} ({input_filename_path.name})"
-    plt.title(plot_title)
-    plt.xlim(-180, 180); plt.ylim(-180, 180)
-    plt.axhline(0, color='grey', lw=0.5, linestyle='--'); plt.axvline(0, color='grey', lw=0.5, linestyle='--')
-    plt.xticks(np.arange(-180, 181, 60)); plt.yticks(np.arange(-180, 181, 60))
-    plt.grid(True, linestyle=':', alpha=0.5)
-    plt.gca().set_aspect('equal', adjustable='box')
-    plt.tight_layout(rect=[0, 0, 0.95, 1]) # Adjust rect to make space for colorbar legend
-    if output_path:
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"Ramachandran plot saved to {output_path}")
-    if not no_show:
-        plt.show()
-    plt.close()
-
+# --- Main Plotting Logic ---
 def main():
     parser = argparse.ArgumentParser(
-        description='Plot XVG files with optional Gaussian analysis, Ramachandran handling, and multi-file scatter overlays.',
-        formatter_class=argparse.RawTextHelpFormatter # To allow newlines in help text
+        description="Plot multiple XVG files, optionally overlaying B-factors from PDB chains (mapped or unmapped) on a secondary Y-axis. Supports single combined or per-chain map files.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument('--input', '-i', type=str, nargs='+', help='Path(s) to the XVG file(s). \nMultiple files can be specified for scatter plots to overlay them.', required=False)
-    parser.add_argument('--gaussian', '-g', action='store_true', help='Enable Gaussian distribution analysis (for single time series data)')
-    parser.add_argument('--noline', action='store_true', help='Generate a scatter plot. If multiple inputs, overlays them.')
-    parser.add_argument('--output', '-o', type=str, help='Output file path (optional). \nFor multi-file scatter, this is the direct output name.')
-    parser.add_argument('--no-show', action='store_true', help='Do not display the plot (save only)')
-    parser.add_argument('filepaths', nargs='*', type=str, help=argparse.SUPPRESS) # For positional arguments
+    parser.add_argument('--inputs', required=True, type=str, nargs='+', help="One or more input XVG file paths.")
+    parser.add_argument('--output', type=str, default="plot.png", help="Output plot file name.")
+    
+    parser.add_argument('--title', type=str, default="XVG Data Plot", help="Overall plot title.")
+    parser.add_argument('--xlabel', type=str, help="X-axis label. Uses label from the first XVG if not provided.")
+    parser.add_argument('--ylabel', type=str, help="Y-axis label (primary data - RMSF). Uses label from the first XVG if not provided.")
+    
+    parser.add_argument('--bfac_pdb_id', type=str, help="PDB ID for B-factor extraction (e.g., 1R1K).")
+    parser.add_argument('--bfac_chains', type=str, nargs='+', help="One or more chain IDs for B-factors (e.g., A B).")
+    parser.add_argument('--residue_map_files', type=str, nargs='+', 
+                        help="Residue map file(s) (.rmp). Provide one map file to be used for all chains, "
+                             "or one map file per chain (must match order and number of --bfac_chains). "
+                             "If omitted, B-factors use original PDB residue numbers.")
+    
+    parser.add_argument('--awk_script_dir', type=str, default=".", help="Directory of extract_bfactors.awk.")
+    parser.add_argument('--pdb_download_dir', type=str, default=".", help="Directory for PDB files.")
+
+    parser.add_argument('--figsize', type=str, default="18,10", help="Figure size (width,height), e.g., '12,7'.")
+    parser.add_argument('--dpi', type=int, default=300, help="DPI for raster output.")
+    parser.add_argument('--legend_fontsize', type=str, default="x-small", help="Legend font size.")
 
     args = parser.parse_args()
 
-    input_files = []
-    if args.input:
-        input_files.extend(args.input)
-    if args.filepaths: # Positional arguments
-        input_files.extend(args.filepaths)
-    
-    if not input_files:
-        parser.error("No input files provided. Use --input or positional arguments.")
-        return
+    try:
+        figsize_vals = tuple(map(int, args.figsize.split(',')))
+        if len(figsize_vals) != 2: raise ValueError("Figsize must be two comma-separated integers.")
+    except ValueError as e:
+        print(f"Invalid figsize format '{args.figsize}'. Using default (18,10). Error: {e}", file=sys.stderr)
+        figsize_vals = (18, 10)
 
-    # --- Multi-file scatter plot (--noline and >1 input) ---
-    if args.noline and len(input_files) > 1:
-        print(f"Generating combined scatter plot for: {', '.join(input_files)}")
-        plt.figure(figsize=(10, 7)) # Adjusted size for potentially more legend items
-        
-        first_file_xlabel = "Principal Component 1" # Default
-        first_file_ylabel = "Principal Component 2" # Default
-        first_file_title = "Combined Projection Plot"
-        
-        for i, file_path_str in enumerate(input_files):
-            data, y_legends, title, xlabel, ylabel, filename_stem = parse_xvg_file(file_path_str)
-            if data.size == 0 or data.ndim < 2 or data.shape[1] < 2:
-                print(f"Skipping {file_path_str} for combined plot: No valid 2D data (X, Y). Shape: {data.shape}")
-                continue
-            
-            if i == 0: # Use metadata from the first file for combined plot
-                first_file_xlabel = xlabel if "PC" in xlabel or "Principal Component" in xlabel else "PC1" # Make it more generic for PCA
-                first_file_ylabel = ylabel if "PC" in ylabel or "Principal Component" in ylabel else "PC2"
-                first_file_title = f"Overlay: {Path(input_files[0]).stem} & {Path(input_files[1]).stem}" if len(input_files) == 2 else "Combined PCA Projection"
+    fig, ax1 = plt.subplots(figsize=figsize_vals)
+    color_cycler_rmsf = itertools.cycle(plt.cm.tab10.colors) 
+    lines_for_legend, labels_for_legend = [], []
+    first_xvg_xlabel, first_xvg_ylabel = None, None
 
+    print(f"\n--- Processing {len(args.inputs)} XVG input file(s) ---")
+    for i, xvg_filepath_str in enumerate(args.inputs):
+        xvg_filepath = Path(xvg_filepath_str)
+        # print(f"Reading: {xvg_filepath}")
+        xvg_x, xvg_y, _, xvg_xlabel_file, xvg_ylabel_file = read_xvg(xvg_filepath_str)
 
-            # For 2D projections (e.g. PC1 vs PC2), X is data[:,0], Y is data[:,1]
-            # The y_legends from parse_xvg_file might be for multiple Y columns if the file was e.g. time vs multiple energies.
-            # For PCA 2D projections, we typically have X=PC1, Y=PC2.
-            # So we plot data[:,0] vs data[:,1]
-            plot_label = filename_stem # Use filename stem for legend in combined plots
-            plt.scatter(data[:, 0], data[:, 1], label=plot_label, s=10, alpha=0.7)
-
-        plt.xlabel(first_file_xlabel)
-        plt.ylabel(first_file_ylabel)
-        plt.title(first_file_title)
-        plt.legend(fontsize='small', loc='best')
-        plt.grid(True, alpha=0.5)
-        plt.tight_layout()
-
-        if args.output:
-            output_path_combined = Path(args.output)
-        else:
-            # Create a default name for combined plot
-            base_name = Path(input_files[0]).stem
-            output_path_combined = Path(input_files[0]).with_name(f"combined_scatter_{base_name}.png")
-        
-        plt.savefig(output_path_combined, dpi=300, bbox_inches='tight')
-        print(f"Combined scatter plot saved to {output_path_combined}")
-        if not args.no_show:
-            plt.show()
-        plt.close()
-        return # Handled combined plot, so exit
-
-    # --- Process single files or other plot types ---
-    # (This part remains largely the same, but iterates if multiple inputs were given without --noline for combined scatter)
-    for file_path_str in input_files:
-        input_file_path = Path(file_path_str)
-        data, y_legends, title, xlabel, ylabel, input_filename_stem = parse_xvg_file(file_path_str)
-
-        if data.size == 0 or data.ndim < 2 : # For most plots, we need at least 2D array (e.g. X vs Y)
-            print(f"No valid 2D data to plot for {file_path_str}. Exiting or skipping.")
-            continue # Skip this file if multiple inputs, or exit if single.
-
-        is_ramachandran_file = "ramachandran" in input_filename_stem.lower() or \
-                               ("phi" in xlabel.lower() and "psi" in ylabel.lower()) or \
-                               ("phi" in title.lower() and "psi" in title.lower())
-
-
-        default_suffix = ".png"
-        if args.gaussian and not is_ramachandran_file:
-            default_suffix = f"_{input_filename_stem}_gaussian.png"
-        elif is_ramachandran_file:
-             default_suffix = f"_{input_filename_stem}_ramachandran.png"
-        elif args.noline: # Single file scatter
-            default_suffix = f"_{input_filename_stem}_scatter.png"
-        else:
-             default_suffix = f"_{input_filename_stem}.png"
-
-        if args.output and len(input_files) == 1: # Only use -o directly if one input file (and not handled by combined scatter)
-            output_path = Path(args.output)
-        else: # Default naming for single files or series of plots
-            output_path = input_file_path.with_name(input_filename_stem + default_suffix)
-            if args.output and len(input_files) > 1: # Using -o as a prefix/directory
-                 output_dir = Path(args.output)
-                 if output_dir.suffix: # if user gave a file name, use its parent as dir
-                     output_dir = output_dir.parent
-                 output_dir.mkdir(parents=True, exist_ok=True)
-                 output_path = output_dir / (input_filename_stem + default_suffix)
-
-
-        if is_ramachandran_file and data.shape[1] >= 2: # Needs at least 2 columns (phi, psi)
-            print(f"Detected Ramachandran data for {file_path_str}. Generating 2D histogram.")
-            plot_ramachandran(data, title, xlabel, ylabel, input_file_path, output_path=output_path, no_show=args.no_show)
-        elif data.shape[1] < 2: # Not enough columns for X, Y plot
-            print(f"Warning: Data in {file_path_str} has shape {data.shape}, not suitable for standard X,Y plotting. Skipping.")
+        if xvg_x is None or xvg_y is None:
+            print(f"Skipping {xvg_filepath_str} due to read error.", file=sys.stderr)
             continue
-        elif args.gaussian:
-            print(f"Generating Gaussian analysis plot for {file_path_str}")
-            fig = plot_with_gaussian(data, y_legends, title, xlabel, ylabel, input_filename_stem)
-            plt.savefig(output_path, dpi=300, bbox_inches='tight')
-            print(f"Plot saved to {output_path}")
-            if not args.no_show:
-                plt.show()
-            plt.close(fig)
-        else: # Default plotting (line or scatter for single file)
-            plot_type_msg = "scatter plot (due to --noline)" if args.noline else "standard time series plot"
-            print(f"Generating {plot_type_msg} for {file_path_str}")
-            plt.figure(figsize=(10, 6))
-            
-            # Standard plot: data[:,0] is X, subsequent columns are Y series
-            for y_col_idx in range(1, data.shape[1]):
-                legend_idx = y_col_idx - 1
-                legend_label = y_legends[legend_idx] if legend_idx < len(y_legends) else f"Y-Col {y_col_idx}"
+       #START OF PATCH - trying to avoid horizontal artefacts 
+        if xvg_x is not None and xvg_x.size > 0:  # Ensure there's data to sort
+            sort_indices = np.argsort(xvg_x)
+            xvg_x = xvg_x[sort_indices]
+            xvg_y = xvg_y[sort_indices]
+        #END OF PATCH 
+                # START OF NEW PATCH for handling gaps in RMSF data
+        xvg_x_to_plot = xvg_x
+        xvg_y_to_plot = xvg_y
+
+        if xvg_x is not None and xvg_x.size > 1: # Need at least two points to check for a gap
+            processed_x = [xvg_x[0]]
+            processed_y = [xvg_y[0]]
+            # A gap is significant if the difference in residue numbers is greater than this.
+            # 1.5 means any non-sequential integer jump (e.g., 10 then 12) will get a NaN.
+            # Adjust this threshold if your residue numbering has legitimate non-integer steps
+            # or if you want to allow for larger integer gaps before breaking the line.
+            residue_gap_threshold = 1.5
+
+            for j in range(1, len(xvg_x)):
+                if (xvg_x[j] - xvg_x[j-1]) > residue_gap_threshold:
+                    processed_x.append(np.nan) # Insert NaN to break the line
+                    processed_y.append(np.nan)
+                processed_x.append(xvg_x[j])
+                processed_y.append(xvg_y[j])
+
+            xvg_x_to_plot = np.array(processed_x)
+            xvg_y_to_plot = np.array(processed_y)
+        # END OF NEW PATCH for RMSF data
+
+        if i == 0: 
+            first_xvg_xlabel = xvg_xlabel_file
+            first_xvg_ylabel = xvg_ylabel_file
+
+        label_parts = [xvg_filepath.parent.name] if xvg_filepath.parent.name != "." and xvg_filepath.parent.name != "analysis_output" else []
+        stem_name = xvg_filepath.stem.replace("_per_res", "").replace("_calpha"," Cα")
+        label_parts.append(stem_name)
+        plot_label = " ".join(label_parts) if label_parts else xvg_filepath.name
+
+        line, = ax1.plot(xvg_x_to_plot, xvg_y_to_plot, color=next(color_cycler_rmsf), label=plot_label, alpha=0.8, linewidth=1.5)        
+        lines_for_legend.append(line)
+        labels_for_legend.append(plot_label)
+    
+    if not lines_for_legend:
+        print("Error: No valid XVG data could be plotted. Exiting.", file=sys.stderr)
+        sys.exit(1)
+
+    ax1.set_xlabel(args.xlabel or first_xvg_xlabel or "Residue Number")
+    ax1.set_ylabel(args.ylabel or first_xvg_ylabel or "RMSF (nm)", color='black')
+    ax1.tick_params(axis='y', labelcolor='black')
+    ax1.grid(True, alpha=0.3, axis='x', linestyle=':') 
+    ax1.grid(True, alpha=0.3, axis='y', linestyle=':', color='grey') 
+
+    ax2 = None 
+    any_bfactors_plotted = False
+    plot_title = args.title
+    bfactor_info_for_title = []
+    
+    # --- B-factor and Mapping Setup ---
+    shared_map_data = None
+    use_shared_map = False
+    use_individual_maps = False
+
+    if args.bfac_pdb_id and args.bfac_chains and args.residue_map_files:
+        if len(args.residue_map_files) == 1 and len(args.bfac_chains) >= 1: # Allow single map for single chain too
+            print(f"Using shared residue map file: {args.residue_map_files[0]} for all specified chains.")
+            shared_map_data = parse_residue_map_rmp(args.residue_map_files[0])
+            if shared_map_data is None:
+                print(f"Warning: Could not parse the shared map file {args.residue_map_files[0]}. B-factors will use original PDB residue numbers if plotted.", file=sys.stderr)
+            else:
+                use_shared_map = True
+        elif len(args.residue_map_files) == len(args.bfac_chains):
+            print("Using individual residue map file for each specified chain.")
+            use_individual_maps = True
+        else:
+            print("Error: Number of --residue_map_files must be 1 (for a shared map) or match the number of --bfac_chains.", file=sys.stderr)
+            # Continue without mapping if B-factors are requested, or could exit
+            print("B-factors will be plotted with original PDB residue numbers if possible.", file=sys.stderr)
+
+
+    if args.bfac_pdb_id and args.bfac_chains:
+        print(f"\n--- Processing B-factors for PDB {args.bfac_pdb_id}, Chains: {', '.join(args.bfac_chains)} ---")
+        awk_script_full_path = Path(args.awk_script_dir) / "extract_bfactors.awk"
+        
+        bfactor_styles = [
+            {'color': 'dimgray', 'linestyle': ':', 'marker': '.'}, 
+            {'color': 'darkslateblue', 'linestyle': '--', 'marker': '.'},
+            {'color': 'darkgreen', 'linestyle': '-.', 'marker': '.'},
+            {'color': 'maroon', 'linestyle': ':', 'marker': '.'},
+        ] 
+        common_style_params = {'markersize': 3.5, 'alpha': 0.7, 'linewidth': 1.2}
+        style_cycler_bfac = itertools.cycle(bfactor_styles)
+
+        for i, chain_id in enumerate(args.bfac_chains):
+            print(f"-- Processing Chain {chain_id} --")
+            original_bfac_res, original_bfac_vals = get_bfactors(
+                args.bfac_pdb_id, chain_id, str(awk_script_full_path), args.pdb_download_dir
+            )
+
+            if original_bfac_res is None or original_bfac_vals is None or original_bfac_res.size == 0:
+                print(f"Could not retrieve or process B-factors for {args.bfac_pdb_id} Chain {chain_id}.")
+                continue
+
+            bfactor_x_for_plotting = original_bfac_res
+            bfactor_y_for_plotting = original_bfac_vals
+            chain_mapped_status = "orig. PDB res." 
+            current_map_to_use = None
+            map_file_name_for_log = "N/A"
+
+            if use_shared_map and shared_map_data is not None:
+                current_map_to_use = shared_map_data
+                map_file_name_for_log = args.residue_map_files[0]
+            elif use_individual_maps:
+                map_file_path_str = args.residue_map_files[i]
+                map_file_name_for_log = map_file_path_str
+                print(f"Using individual map file: {map_file_path_str} for chain {chain_id}")
+                current_map_to_use = parse_residue_map_rmp(map_file_path_str)
+                if current_map_to_use is None:
+                    print(f"Warning: Could not parse map file {map_file_path_str} for chain {chain_id}. Plotting with original residue numbers.")
+
+            if current_map_to_use:
+                mapped_res_for_xvg_axis, mapped_vals, unmapped_count = [], [], 0
+                for res_idx, res_num_from_bfac_pdb in enumerate(original_bfac_res):
+                    if res_num_from_bfac_pdb in current_map_to_use:
+                        mapped_res_for_xvg_axis.append(current_map_to_use[res_num_from_bfac_pdb])
+                        mapped_vals.append(original_bfac_vals[res_idx])
+                    else:
+                        unmapped_count +=1
                 
-                if args.noline: # This is for single file scatter
-                    plt.scatter(data[:, 0], data[:, y_col_idx], label=legend_label, s=10)
+                if mapped_res_for_xvg_axis:
+                    bfactor_x_for_plotting = np.array(mapped_res_for_xvg_axis)
+                    bfactor_y_for_plotting = np.array(mapped_vals)
+                    chain_mapped_status = "mapped"
+                    print(f"Successfully mapped {len(mapped_vals)} B-factors for chain {chain_id} using map from {Path(map_file_name_for_log).name}.")
+                    if unmapped_count > 0:
+                        print(f"Note: {unmapped_count} B-factor residues from chain {chain_id} were not found in map from {Path(map_file_name_for_log).name}.")
                 else:
-                    plt.plot(data[:, 0], data[:, y_col_idx], label=legend_label)
-
-            plt.xlabel(xlabel)
-            plt.ylabel(ylabel)
-            final_title = f"{title} ({input_filename_stem})" if title != "GROMACS Data" else f"{input_filename_stem}"
-            plt.title(final_title)
+                    print(f"Warning: No B-factors could be mapped for chain {chain_id} using map from {Path(map_file_name_for_log).name}. Plotting with original residue numbers.")
             
-            # Improved legend display logic
-            if data.shape[1] > 2 or (y_legends and any(not leg.startswith("Y-Col") for leg in y_legends)):
-                 plt.legend()
+            bfactor_legend_label = f"B-factors ({args.bfac_pdb_id} Ch.{chain_id}"
+            # Only add mapping status if mapping was attempted (i.e., map files were provided)
+            if args.residue_map_files : 
+                 bfactor_legend_label += f" {chain_mapped_status}"
+            bfactor_legend_label += ")"
+            
+            # Add info for title regardless of successful mapping, but reflect status
+            bfactor_info_for_title.append(f"Ch.{chain_id} ({chain_mapped_status if args.residue_map_files else 'orig. PDB res.'})")
 
-            plt.grid(True, alpha=0.5)
-            plt.tight_layout()
-            plt.savefig(output_path, dpi=300, bbox_inches='tight')
-            print(f"Plot saved to {output_path}")
-            if not args.no_show:
-                plt.show()
-            plt.close()
 
-if __name__ == "__main__":
+            if bfactor_x_for_plotting.size > 0:
+                if not ax2: 
+                    ax2 = ax1.twinx()
+                    ax2_ylabel_base = f'B-factor (\u00C5\u00B2)'
+                    ax2.set_ylabel(ax2_ylabel_base) 
+                    ax2.grid(True, alpha=0.2, axis='y', linestyle=':', color='lightgrey')
+
+                current_style = next(style_cycler_bfac)
+                ax2.tick_params(axis='y', labelcolor=current_style['color']) 
+
+                line_bfac, = ax2.plot(bfactor_x_for_plotting, bfactor_y_for_plotting, 
+                                      label=bfactor_legend_label, 
+                                      **current_style, **common_style_params)
+                lines_for_legend.append(line_bfac)
+                labels_for_legend.append(bfactor_legend_label)
+                any_bfactors_plotted = True
+        
+        if any_bfactors_plotted and bfactor_info_for_title:
+            title_suffix = f" (B-factors: {args.bfac_pdb_id} " + ", ".join(bfactor_info_for_title) + ")"
+            # Avoid appending if default title is used and it already contains "(B-factors..."
+            if not (args.title == parser.get_default("title") and "(B-factors" in args.title):
+                 plot_title += title_suffix
+            elif args.title != parser.get_default("title"): # User provided a custom title
+                 plot_title += title_suffix
+
+
+    ax1.set_title(plot_title, fontsize='medium')
+    
+    if lines_for_legend: # Ensure there's something to make a legend for
+        ax1.legend(lines_for_legend, labels_for_legend, loc='best', fontsize=args.legend_fontsize)
+    
+    plt.tight_layout()
+    
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        plt.savefig(output_path, dpi=args.dpi, bbox_inches='tight')
+        print(f"\nPlot saved to {output_path}")
+    except Exception as e:
+        print(f"Error saving plot to {output_path}: {e}", file=sys.stderr)
+
+if __name__ == '__main__':
     main()
 
