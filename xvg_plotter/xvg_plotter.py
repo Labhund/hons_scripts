@@ -5,7 +5,7 @@ import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors # For LogNorm and colormaps
-matplotlib.rcParams['agg.path.chunksize'] = 50000
+import matplotlib.rcParams['agg.path.chunksize'] = 50000
 from pathlib import Path
 import sys
 import itertools # For color cycling
