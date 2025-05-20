@@ -4,6 +4,7 @@ import argparse
 import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
+matplotlib.rcParams['agg.path.chunksize'] = 50000
 from pathlib import Path
 import sys
 import itertools # For color cycling
