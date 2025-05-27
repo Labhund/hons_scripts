@@ -585,7 +585,7 @@ def main():
                 ax1.text(0.5, 0.5, "Empty combined data", ha='center', va='center', transform=ax1.transAxes)
                 if not hist_title_set: final_plot_title = final_plot_title or "2D Histogram Error"
             else:
-                norm_choice = matplotlib.colors.LogNorm() if args.hist_log_scale else None
+                norm_choice = mcolors.LogNorm() if args.hist_log_scale else None
                 counts, xedges, yedges, im = ax1.hist2d(
                     combined_x, combined_y, bins=args.hist_bins, cmap=args.hist_cmap, norm=norm_choice, cmin=1 if args.hist_log_scale else None
                 )
