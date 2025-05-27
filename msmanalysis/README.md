@@ -1,6 +1,3 @@
-## README for `msmanalysis.py`
-
-````markdown
 # MSM Analysis Pipeline (`msmanalysis.py`)
 
 ## Project Overview
