@@ -96,11 +96,20 @@ def main():
         dest="mol2_file",
         help="Path to the input MOL2 file."
     )
-    parser.add_argument(
+    
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
         "-o", "--output",
         dest="xyz_file",
         help="Path to the output XYZ file."
     )
+    output_group.add_argument(
+        "--deffnm",
+        action="store_true",
+        help="Automatically determine output XYZ filename based on input MOL2 filename "
+             "(e.g., input.mol2 -> input.xyz). If used, -o/--output is ignored."
+    )
+
     parser.add_argument(
         "--run_example",
         action="store_true",
@@ -146,16 +155,35 @@ USER_CHARGES
             if os.path.exists(example_xyz_file):
                 os.remove(example_xyz_file)
     else:
-        if not args.mol2_file or not args.xyz_file:
+        if not args.mol2_file:
             parser.error(
-                "the following arguments are required: -i/--input, -o/--output\n"
+                "the following argument is required: -i/--input "
                 "(unless --run_example is specified)"
             )
+
+        mol2_file_path = args.mol2_file
+        xyz_file_path = None
+
+        if args.deffnm:
+            if args.xyz_file:
+                # This case should not happen if using add_mutually_exclusive_group
+                # but as a safeguard or if not using it:
+                print(f"Warning: --deffnm specified, -o/--output '{args.xyz_file}' will be ignored.")
+            base_name, _ = os.path.splitext(mol2_file_path)
+            xyz_file_path = base_name + ".xyz"
+        elif args.xyz_file:
+            xyz_file_path = args.xyz_file
+        else:
+            parser.error(
+                "an output file must be specified via -o/--output or by using the --deffnm flag "
+                "(unless --run_example is specified)"
+            )
+        
         try:
-            num_atoms = mol2_to_xyz(args.mol2_file, args.xyz_file)
-            print(f"Successfully converted {num_atoms} atoms from {args.mol2_file} to {args.xyz_file}")
+            num_atoms = mol2_to_xyz(mol2_file_path, xyz_file_path)
+            print(f"Successfully converted {num_atoms} atoms from {mol2_file_path} to {xyz_file_path}")
         except FileNotFoundError:
-            print(f"Error: Input MOL2 file not found at {args.mol2_file}")
+            print(f"Error: Input MOL2 file not found at {mol2_file_path}")
         except ValueError as ve:
             print(f"Error processing MOL2 file: {ve}")
         except Exception as e:
