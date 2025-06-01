@@ -151,7 +151,11 @@ def generate_comparison_data(
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
     """Generates headers and data rows for the comparison report."""
     
-    headers = ["Atom Name", "CGenFF Type", "CGenFF Q", "Penalty", "Loewdin Q", "Mulliken Q"]
+    headers = [
+        "Atom Name", "CGenFF Type", "CGenFF Q", "Penalty", 
+        "Loewdin Q", "Mulliken Q", "Mean QM Q",
+        "Abs_Diff", "Pct_Diff", "Sym_Std_Diff"
+    ]
     data_rows: List[Dict[str, Any]] = []
 
     loewdin_map = {oc.index: oc for oc in orca_data.get('loewdin', [])}
@@ -161,6 +165,10 @@ def generate_comparison_data(
         if atom.penalty > penalty_threshold:
             loewdin_q_val: Optional[float] = None
             mulliken_q_val: Optional[float] = None
+            mean_qm_q: Optional[float] = None
+            abs_diff: Optional[float] = None
+            pct_diff: Optional[float] = None
+            sym_std_diff: Optional[float] = None
 
             orca_atom_idx_to_match = atom.original_index 
 
@@ -178,6 +186,20 @@ def generate_comparison_data(
                 else:
                     print(f"Warning: Element mismatch for Mulliken. CGenFF: {atom.name}({atom.element}, idx {atom.original_index}), ORCA: ({orca_mulliken_atom.element}, idx {orca_atom_idx_to_match})")
 
+            # Calculate new metrics if QM charges are available
+            if loewdin_q_val is not None and mulliken_q_val is not None:
+                mean_qm_q = (loewdin_q_val + mulliken_q_val) / 2.0
+                
+                abs_diff = atom.charge - mean_qm_q
+                
+                if abs(mean_qm_q) < 0.01:
+                    pct_diff = None # Will be formatted as N/A
+                else:
+                    pct_diff = ((atom.charge - mean_qm_q) / mean_qm_q) * 100.0
+                
+                denominator_sym_std = (abs(atom.charge) + abs(mean_qm_q)) + 1e-9
+                sym_std_diff = ((atom.charge - mean_qm_q) / denominator_sym_std) * 100.0
+            
             row_data: Dict[str, Any] = {
                 "Atom Name": atom.name,
                 "CGenFF Type": atom.atom_type,
@@ -185,6 +207,10 @@ def generate_comparison_data(
                 "Penalty": atom.penalty,
                 "Loewdin Q": loewdin_q_val,
                 "Mulliken Q": mulliken_q_val,
+                "Mean QM Q": mean_qm_q,
+                "Abs_Diff": abs_diff,
+                "Pct_Diff": pct_diff,
+                "Sym_Std_Diff": sym_std_diff,
             }
             data_rows.append(row_data)
             
@@ -194,9 +220,15 @@ def format_report_for_console(headers: List[str], data_rows: List[Dict[str, Any]
     """Formats the report data for console printing."""
     report_lines: List[str] = []
     
-    # Format header
-    report_lines.append(f"{headers[0]:<10} | {headers[1]:<12} | {headers[2]:>12} | {headers[3]:>10} | {headers[4]:>12} | {headers[5]:>12}")
-    report_lines.append("-" * (10 + 3 + 12 + 3 + 12 + 3 + 10 + 3 + 12 + 3 + 12))
+    # Adjust column widths as needed
+    header_format = (
+        f"{headers[0]:<10} | {headers[1]:<12} | {headers[2]:>10} | {headers[3]:>10} | "
+        f"{headers[4]:>10} | {headers[5]:>10} | {headers[6]:>10} | " # Mean QM Q
+        f"{headers[7]:>10} | {headers[8]:>10} | {headers[9]:>12}"  # Abs_Diff, Pct_Diff, Sym_Std_Diff
+    )
+    report_lines.append(header_format)
+    line_length = len(header_format)
+    report_lines.append("-" * line_length)
 
     if not data_rows:
         report_lines.append("No atoms found with penalty above the threshold.")
@@ -204,9 +236,15 @@ def format_report_for_console(headers: List[str], data_rows: List[Dict[str, Any]
         for row in data_rows:
             loewdin_q_str = f"{row['Loewdin Q']:.6f}" if row['Loewdin Q'] is not None else "N/A"
             mulliken_q_str = f"{row['Mulliken Q']:.6f}" if row['Mulliken Q'] is not None else "N/A"
+            mean_qm_q_str = f"{row['Mean QM Q']:.6f}" if row['Mean QM Q'] is not None else "N/A"
+            abs_diff_str = f"{row['Abs_Diff']:.6f}" if row['Abs_Diff'] is not None else "N/A"
+            pct_diff_str = f"{row['Pct_Diff']:.2f}%" if row['Pct_Diff'] is not None else "N/A"
+            sym_std_diff_str = f"{row['Sym_Std_Diff']:.2f}%" if row['Sym_Std_Diff'] is not None else "N/A"
+            
             report_lines.append(
-                f"{row['Atom Name']:<10} | {row['CGenFF Type']:<12} | {row['CGenFF Q']:>12.6f} | {row['Penalty']:>10.3f} | "
-                f"{loewdin_q_str:>12} | {mulliken_q_str:>12}"
+                f"{row['Atom Name']:<10} | {row['CGenFF Type']:<12} | {row['CGenFF Q']:>10.6f} | {row['Penalty']:>10.3f} | "
+                f"{loewdin_q_str:>10} | {mulliken_q_str:>10} | {mean_qm_q_str:>10} | "
+                f"{abs_diff_str:>10} | {pct_diff_str:>10} | {sym_std_diff_str:>12}"
             )
     return "\n".join(report_lines)
 
@@ -217,11 +255,23 @@ def write_report_to_csv(filepath: str, headers: List[str], data_rows: List[Dict[
             writer = csv.DictWriter(csvfile, fieldnames=headers)
             writer.writeheader()
             for row in data_rows:
-                # Prepare row for DictWriter, handling None for N/A
-                csv_row = {header: (f"{row[header]:.6f}" if isinstance(row[header], float) and header.endswith(" Q") else
-                                    f"{row[header]:.3f}" if isinstance(row[header], float) and header == "Penalty" else
-                                    row[header] if row[header] is not None else "N/A")
-                           for header, value in row.items()}
+                # Prepare row for DictWriter, handling None for N/A and formatting floats
+                csv_row = {}
+                for header in headers:
+                    value = row[header]
+                    if value is None:
+                        csv_row[header] = "N/A"
+                    elif isinstance(value, float):
+                        if header.endswith(" Q") or header == "Abs_Diff":
+                            csv_row[header] = f"{value:.6f}"
+                        elif header == "Penalty":
+                            csv_row[header] = f"{value:.3f}"
+                        elif header == "Pct_Diff" or header == "Sym_Std_Diff":
+                             csv_row[header] = f"{value:.2f}%" # Adding % for CSV as well
+                        else:
+                            csv_row[header] = value 
+                    else:
+                        csv_row[header] = value
                 writer.writerow(csv_row)
         print(f"Report successfully written to {filepath}")
     except IOError:
