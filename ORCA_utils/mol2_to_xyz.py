@@ -91,10 +91,18 @@ def main():
         description="Convert a MOL2 file to an XYZ file for ORCA.",
         formatter_class=argparse.RawTextHelpFormatter # Allows for better formatting in help text
     )
+    # Input file: can be positional or via -i/--input.
+    # If both are given, -i/--input takes precedence.
+    parser.add_argument(
+        "input_mol2_file",
+        metavar="MOL2_FILE",
+        nargs='?', # Optional, to allow --run_example and -i to function without it
+        help="Path to the input MOL2 file (positional)."
+    )
     parser.add_argument(
         "-i", "--input",
-        dest="mol2_file",
-        help="Path to the input MOL2 file."
+        dest="input_mol2_file_opt", # Different dest to distinguish from positional
+        help="Path to the input MOL2 file (optional, overrides positional argument)."
     )
     
     output_group = parser.add_mutually_exclusive_group()
@@ -155,28 +163,36 @@ USER_CHARGES
             if os.path.exists(example_xyz_file):
                 os.remove(example_xyz_file)
     else:
-        if not args.mol2_file:
+        mol2_file_path = None
+        # Determine the input file path, -i/--input option takes precedence
+        if args.input_mol2_file_opt:
+            mol2_file_path = args.input_mol2_file_opt
+            if args.input_mol2_file and args.input_mol2_file != args.input_mol2_file_opt:
+                print(f"Warning: Both positional input ('{args.input_mol2_file}') and option -i/--input ('{args.input_mol2_file_opt}') were specified. "
+                      f"Using the value from -i/--input: '{args.input_mol2_file_opt}'.")
+        elif args.input_mol2_file:
+            mol2_file_path = args.input_mol2_file
+        
+        if not mol2_file_path:
             parser.error(
-                "the following argument is required: -i/--input "
-                "(unless --run_example is specified)"
+                "An input MOL2 file must be provided either positionally or via -i/--input "
+                "(unless --run_example is specified)."
             )
 
-        mol2_file_path = args.mol2_file
         xyz_file_path = None
 
         if args.deffnm:
-            if args.xyz_file:
-                # This case should not happen if using add_mutually_exclusive_group
-                # but as a safeguard or if not using it:
-                print(f"Warning: --deffnm specified, -o/--output '{args.xyz_file}' will be ignored.")
-            base_name, _ = os.path.splitext(mol2_file_path)
+            # if args.xyz_file: # This warning is not strictly needed due to mutually_exclusive_group
+            #     print(f"Warning: --deffnm specified, -o/--output '{args.xyz_file}' will be ignored.")
+            base_name, _ = os.path.splitext(mol2_file_path) # Use the determined mol2_file_path
             xyz_file_path = base_name + ".xyz"
         elif args.xyz_file:
             xyz_file_path = args.xyz_file
         else:
+            # This error is reachable if neither -o nor --deffnm is provided.
             parser.error(
-                "an output file must be specified via -o/--output or by using the --deffnm flag "
-                "(unless --run_example is specified)"
+                "An output file must be specified via -o/--output or by using the --deffnm flag "
+                "(unless --run_example is specified)."
             )
         
         try:
