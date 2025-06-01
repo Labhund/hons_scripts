@@ -62,8 +62,8 @@ def mol2_to_xyz(mol2_file, xyz_file):
                     atoms.append((element, x, y, z))
                 except ValueError:
                     print(f"Warning: Skipping malformed atom line: {line_content}")
-            # else: # Optional: warn about lines that don't have enough parts
-                # print(f"Warning: Skipping line with insufficient parts in ATOM section: {line_content}")
+            else: # Optional: warn about lines that don't have enough parts
+                print(f"Warning: Skipping line with insufficient parts in ATOM section: {line_content}")
     
     if not atoms:
         raise ValueError(f"No atoms found or parsed from {mol2_file}")
