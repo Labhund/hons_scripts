@@ -61,7 +61,6 @@ def parse_orca_out(orca_filepath: str) -> Dict[str, List[OrcaCharge]]:
     charges: Dict[str, List[OrcaCharge]] = {"loewdin": [], "mulliken": []}
     
     loewdin_pattern = re.compile(r"^\s*(\d+)\s+([A-Za-z]+)\s*:\s*([-\d.]+)")
-    # Mayer section for Mulliken: ATOM INDEX ELEMENT ... QA ... (QA is the 4th value after ATOM)
     mulliken_pattern = re.compile(r"^\s*(\d+)\s+([A-Za-z]+)\s+\S+\s+\S+\s+([-\d.]+).*")
 
     try:
@@ -71,20 +70,19 @@ def parse_orca_out(orca_filepath: str) -> Dict[str, List[OrcaCharge]]:
         print(f"Error: ORCA output file not found at {orca_filepath}")
         return charges
 
-    current_section = None # Can be "loewdin", "mulliken"
-    # Flag to indicate if the header of the Mayer section has been passed
+    current_section = None 
     mayer_header_skipped = False
 
     for line in lines:
         # Detect section starts
         if "LOEWDIN ATOMIC CHARGES" in line:
             current_section = "loewdin"
-            charges["loewdin"] = [] # Reset in case of multiple sections (unlikely for valid files)
+            charges["loewdin"] = [] 
             continue
         elif "MAYER POPULATION ANALYSIS" in line:
             current_section = "mulliken"
-            charges["mulliken"] = [] # Reset
-            mayer_header_skipped = False # Reset header flag for this section
+            charges["mulliken"] = [] 
+            mayer_header_skipped = False # Reset for the start of this specific section
             continue
         
         # Detect section ends by specific keywords or change of major section
@@ -93,20 +91,20 @@ def parse_orca_out(orca_filepath: str) -> Dict[str, List[OrcaCharge]]:
                 current_section = None
                 continue
         elif current_section == "mulliken":
-            if ("Sum of atomic valences" in line or 
-                "Mayer bond orders" in line or
-                ("****" in line and "ANALYSIS" not in line and "POPULATION" not in line)): # Avoid matching section title
-                current_section = None
-                mayer_header_skipped = False
-                continue
+            # Termination conditions for Mulliken section should only apply AFTER its header is parsed.
+            if mayer_header_skipped: # <<< KEY CHANGE: Only check if header was already skipped
+                if "Sum of atomic valences" in line or \
+                   "Mayer bond orders" in line:
+                    current_section = None
+                    # mayer_header_skipped = False; # Not strictly needed to reset, as section is ending
+                    continue
         
         # If a blank line is encountered after some data has been collected for the current section,
-        # it's a strong indicator that the data block for that section has ended.
-        if current_section and not line.strip():
+        # it can also signify the end of the data block.
+        if current_section and not line.strip(): # Blank line check
             if (current_section == "loewdin" and charges["loewdin"]) or \
-               (current_section == "mulliken" and charges["mulliken"]):
+               (current_section == "mulliken" and charges["mulliken"] and mayer_header_skipped): # For Mulliken, also ensure header was passed
                 current_section = None
-                mayer_header_skipped = False # Reset if it was Mulliken
                 continue
 
         # Process lines based on current section
@@ -119,7 +117,7 @@ def parse_orca_out(orca_filepath: str) -> Dict[str, List[OrcaCharge]]:
                 idx, element, charge_str = match.groups()
                 charges["loewdin"].append(OrcaCharge(
                     index=int(idx),
-                    element=element.strip(), # Ensure element symbol is clean
+                    element=element.strip(), 
                     charge=float(charge_str)
                 ))
         
@@ -128,16 +126,18 @@ def parse_orca_out(orca_filepath: str) -> Dict[str, List[OrcaCharge]]:
             if not mayer_header_skipped:
                 if "ATOM       NA         ZA         QA" in line:
                     mayer_header_skipped = True
-                # Continue skipping lines (including "----" under the header) until the data starts
+                # This continue is vital: it skips the current line (e.g. '****' border, description, or 'ATOM NA...')
+                # from falling into the data parsing logic below in this same iteration.
+                # It also prevents such lines from being evaluated by the termination logic above if mayer_header_skipped is false.
                 continue 
             
-            # After header is skipped, try to match data
+            # After header is skipped (mayer_header_skipped is True), and if not a termination line, try to match data.
             match = mulliken_pattern.match(line)
             if match:
                 idx, element, qa_charge_str = match.groups()
                 charges["mulliken"].append(OrcaCharge(
                     index=int(idx), 
-                    element=element.strip(), # Ensure element symbol is clean
+                    element=element.strip(), 
                     charge=float(qa_charge_str)
                 ))
                 
