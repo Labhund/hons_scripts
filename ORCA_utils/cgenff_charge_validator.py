@@ -1,7 +1,8 @@
 import re
 import argparse
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
+import csv # Added for CSV output
 
 @dataclass
 class CGenFFAtom:
@@ -22,14 +23,14 @@ def get_element_from_cgenff_atom_name(atom_name: str) -> str:
     """Extracts element symbol from CGenFF atom name (e.g., C1->C, H01->H)."""
     match = re.match(r"([A-Za-z]+)", atom_name)
     if match:
+        # Prioritize two-letter symbols if the full matched string is a known two-letter element
+        if len(match.group(1)) == 2 and match.group(1).upper() in ["CL", "BR", "NA", "MG", "ZN", "FE", "CU", "MN"]: # Add more as needed
+            return match.group(1).upper()
+        # Fallback to first letter for single-letter elements or others
         element_symbol = match.group(1)[0].upper()
-        # Basic check for common elements, can be expanded
-        if element_symbol in ['H', 'C', 'N', 'O', 'S', 'P', 'F']:
+        if element_symbol in ['H', 'C', 'N', 'O', 'S', 'P', 'F', 'I', 'K', 'B']: # Added I, K, B
             return element_symbol
-        # For two-letter symbols like Cl, Br, if atom names are e.g. CL1, BR1
-        if len(match.group(1)) > 1 and match.group(1)[:2].upper() in ["CL", "BR"]:
-            return match.group(1)[:2].upper()
-    return atom_name[0].upper() # Fallback to first letter
+    return atom_name[0].upper() # Fallback to first letter if regex fails or no specific match
 
 def parse_cgenff_str(str_filepath: str) -> List[CGenFFAtom]:
     """Parses ATOM lines from a CGenFF .str file."""
@@ -143,59 +144,88 @@ def parse_orca_out(orca_filepath: str) -> Dict[str, List[OrcaCharge]]:
                 
     return charges
 
-def generate_comparison_report(
+def generate_comparison_data(
     cgenff_atoms: List[CGenFFAtom],
     orca_data: Dict[str, List[OrcaCharge]],
     penalty_threshold: float
-) -> str:
-    """Generates a formatted string table comparing charges."""
-    report_lines: List[str] = []
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Generates headers and data rows for the comparison report."""
     
     headers = ["Atom Name", "CGenFF Type", "CGenFF Q", "Penalty", "Loewdin Q", "Mulliken Q"]
-    report_lines.append(f"{headers[0]:<10} | {headers[1]:<12} | {headers[2]:>12} | {headers[3]:>10} | {headers[4]:>12} | {headers[5]:>12}")
-    report_lines.append("-" * (10 + 3 + 12 + 3 + 12 + 3 + 10 + 3 + 12 + 3 + 12))
+    data_rows: List[Dict[str, Any]] = []
 
-    # Create dictionaries for quick lookup of ORCA charges by index
     loewdin_map = {oc.index: oc for oc in orca_data.get('loewdin', [])}
     mulliken_map = {oc.index: oc for oc in orca_data.get('mulliken', [])}
 
-    atoms_reported_count = 0
     for atom in cgenff_atoms:
         if atom.penalty > penalty_threshold:
-            atoms_reported_count += 1
-            loewdin_q_str = "N/A"
-            mulliken_q_str = "N/A"
+            loewdin_q_val: Optional[float] = None
+            mulliken_q_val: Optional[float] = None
 
-            # CGenFF original_index is 0-based, ORCA index from output is also 0-based.
             orca_atom_idx_to_match = atom.original_index 
 
-            # Match Loewdin charge
             if orca_atom_idx_to_match in loewdin_map:
                 orca_loewdin_atom = loewdin_map[orca_atom_idx_to_match]
-                # Element check for safety, case-insensitive
                 if orca_loewdin_atom.element.upper() == atom.element.upper():
-                    loewdin_q_str = f"{orca_loewdin_atom.charge:.6f}"
+                    loewdin_q_val = orca_loewdin_atom.charge
                 else:
                     print(f"Warning: Element mismatch for Loewdin. CGenFF: {atom.name}({atom.element}, idx {atom.original_index}), ORCA: ({orca_loewdin_atom.element}, idx {orca_atom_idx_to_match})")
             
-            # Match Mulliken charge
             if orca_atom_idx_to_match in mulliken_map:
                 orca_mulliken_atom = mulliken_map[orca_atom_idx_to_match]
-                # Element check for safety, case-insensitive
                 if orca_mulliken_atom.element.upper() == atom.element.upper():
-                    mulliken_q_str = f"{orca_mulliken_atom.charge:.6f}"
+                    mulliken_q_val = orca_mulliken_atom.charge
                 else:
                     print(f"Warning: Element mismatch for Mulliken. CGenFF: {atom.name}({atom.element}, idx {atom.original_index}), ORCA: ({orca_mulliken_atom.element}, idx {orca_atom_idx_to_match})")
 
+            row_data: Dict[str, Any] = {
+                "Atom Name": atom.name,
+                "CGenFF Type": atom.atom_type,
+                "CGenFF Q": atom.charge,
+                "Penalty": atom.penalty,
+                "Loewdin Q": loewdin_q_val,
+                "Mulliken Q": mulliken_q_val,
+            }
+            data_rows.append(row_data)
+            
+    return headers, data_rows
+
+def format_report_for_console(headers: List[str], data_rows: List[Dict[str, Any]]) -> str:
+    """Formats the report data for console printing."""
+    report_lines: List[str] = []
+    
+    # Format header
+    report_lines.append(f"{headers[0]:<10} | {headers[1]:<12} | {headers[2]:>12} | {headers[3]:>10} | {headers[4]:>12} | {headers[5]:>12}")
+    report_lines.append("-" * (10 + 3 + 12 + 3 + 12 + 3 + 10 + 3 + 12 + 3 + 12))
+
+    if not data_rows:
+        report_lines.append("No atoms found with penalty above the threshold.")
+    else:
+        for row in data_rows:
+            loewdin_q_str = f"{row['Loewdin Q']:.6f}" if row['Loewdin Q'] is not None else "N/A"
+            mulliken_q_str = f"{row['Mulliken Q']:.6f}" if row['Mulliken Q'] is not None else "N/A"
             report_lines.append(
-                f"{atom.name:<10} | {atom.atom_type:<12} | {atom.charge:>12.6f} | {atom.penalty:>10.3f} | "
+                f"{row['Atom Name']:<10} | {row['CGenFF Type']:<12} | {row['CGenFF Q']:>12.6f} | {row['Penalty']:>10.3f} | "
                 f"{loewdin_q_str:>12} | {mulliken_q_str:>12}"
             )
-            
-    if atoms_reported_count == 0:
-        report_lines.append("No atoms found with penalty above the threshold.")
-        
     return "\n".join(report_lines)
+
+def write_report_to_csv(filepath: str, headers: List[str], data_rows: List[Dict[str, Any]]):
+    """Writes the report data to a CSV file."""
+    try:
+        with open(filepath, 'w', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=headers)
+            writer.writeheader()
+            for row in data_rows:
+                # Prepare row for DictWriter, handling None for N/A
+                csv_row = {header: (f"{row[header]:.6f}" if isinstance(row[header], float) and header.endswith(" Q") else
+                                    f"{row[header]:.3f}" if isinstance(row[header], float) and header == "Penalty" else
+                                    row[header] if row[header] is not None else "N/A")
+                           for header, value in row.items()}
+                writer.writerow(csv_row)
+        print(f"Report successfully written to {filepath}")
+    except IOError:
+        print(f"Error: Could not write CSV file to {filepath}")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -209,6 +239,10 @@ def main():
         default=10.0,
         help="CH_PENALTY threshold for reporting (default: 10.0)."
     )
+    parser.add_argument(
+        "--output_csv",
+        help="Optional path to save the report as a CSV file."
+    )
     args = parser.parse_args()
 
     cgenff_atoms = parse_cgenff_str(args.str_file)
@@ -221,9 +255,13 @@ def main():
     print(f"ORCA Loewdin charges parsed: {len(orca_charges.get('loewdin',[]))}")
     print(f"ORCA Mulliken charges parsed: {len(orca_charges.get('mulliken',[]))}")
 
+    headers, data_rows = generate_comparison_data(cgenff_atoms, orca_charges, args.penalty_threshold)
+    
+    console_report = format_report_for_console(headers, data_rows)
+    print(console_report)
 
-    report = generate_comparison_report(cgenff_atoms, orca_charges, args.penalty_threshold)
-    print(report)
+    if args.output_csv:
+        write_report_to_csv(args.output_csv, headers, data_rows)
 
 if __name__ == "__main__":
     main()
