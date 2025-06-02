@@ -1,60 +1,74 @@
-#### ORCA Utils ####
+# ORCA_utils
 
-This directory hosts a collection of Python scripts designed to streamline workflows and assist with quantum chemistry calculations using the [ORCA Quantum Chemistry Program](https://orcaforum.kofo.mpg.de/). While currently a work in progress, the aim is to provide a suite of helpful tools for pre-processing, post-processing, and analysis of ORCA jobs.
+This directory contains utilities for working with molecular files and charge validation in computational chemistry workflows, especially for ORCA and CGenFF.
 
----
+## Scripts
 
-### Current Utilities
+### 1. `mol2_to_xyz.py`
 
-#### 1. `mol2_to_xyz.py`
+**Purpose:**  
+Convert a MOL2 file to an XYZ file for use in ORCA calculations.
 
-*   **Purpose**: Converts molecular structure files from MOL2 format to XYZ format. XYZ is a simple and widely supported format, often required as input for ORCA and other quantum chemistry software.
-*   **Features**:
-    *   Parses atom coordinates and element types from MOL2 files.
-    *   Extracts the molecule name from the MOL2 file for use in the XYZ comment line.
-    *   Generates an XYZ file with the atom count on the first line, a detailed comment line on the second (including source file, conversion date, and script author), followed by atom coordinates.
-    *   Command-line interface for easy conversion.
-    *   Can be imported as a module into other Python scripts.
-*   **Usage**:
-    *   **Command-line**:
-        ```bash
-        python mol2_to_xyz.py -i <input_mol2_file> -o <output_xyz_file>
-        ```
-        Example:
-        ```bash
-        python mol2_to_xyz.py -i my_molecule.mol2 -o my_molecule.xyz
-        ```
-    *   **Run internal example**:
-        ```bash
-        python mol2_to_xyz.py --run_example
-        ```
-    *   **As a module**:
-        ```python
-        from mol2_to_xyz import mol2_to_xyz
+**Usage:**
+```bash
+python mol2_to_xyz.py [MOL2_FILE] [-i MOL2_FILE] [-o XYZ_FILE | --deffnm] [--run_example]
+```
 
-        try:
-            num_atoms = mol2_to_xyz("input.mol2", "output.xyz")
-            print(f"Successfully converted {num_atoms} atoms.")
-        except Exception as e:
-            print(f"An error occurred: {e}")
-        ```
+**Arguments:**
+- `MOL2_FILE` (positional): Path to the input MOL2 file.
+- `-i`, `--input`: Path to the input MOL2 file (overrides positional).
+- `-o`, `--output`: Path to the output XYZ file.
+- `--deffnm`: Automatically set output filename to match input (e.g., `input.mol2` → `input.xyz`).
+- `--run_example`: Run an internal example conversion.
+
+**Example:**
+```bash
+python mol2_to_xyz.py ligand.mol2 -o ligand.xyz
+python mol2_to_xyz.py -i ligand.mol2 --deffnm
+python mol2_to_xyz.py --run_example
+```
 
 ---
 
-### Future Plans
+### 2. `cgenff_charge_validator.py`
 
-This collection is expected to grow. Potential future utilities include:
+**Purpose:**  
+Compare CGenFF charges (from a `.str` file) with ORCA Loewdin and Mulliken charges (from an ORCA `.out` file) for atoms with high penalty scores. Supports atom index offsetting for cluster calculations using a MOL2 file.
 
-*   **Input File Generation**: Scripts to help generate ORCA input files from templates or other formats, potentially automating the setup of common calculation types (e.g., geometry optimizations, frequency calculations, TD-DFT).
-*   **Output File Parsing**: Tools to extract key information from ORCA output files (`.out`, `.gbw`, `.prop`, etc.), such as:
-    *   Optimized geometries (and conversion to various formats).
-    *   Energies (SCF, ZPE, thermal corrections).
-    *   Vibrational frequencies and normal modes.
-    *   UV-Vis or ECD spectra data from TD-DFT calculations.
-    *   Molecular orbital energies and occupancies.
-*   **Batch Processing**: Utilities to run a series of ORCA calculations or processing steps on multiple molecules.
-*   **Visualization Aids**: Scripts to generate data in formats suitable for common molecular visualization software or plotting libraries (e.g., VMD, ChimeraX, Matplotlib).
-*   **Job Management**: Simple tools for submitting or monitoring ORCA jobs, especially in cluster environments (though this might be limited by system-specific queuing systems).
-*   **Property Calculation Helpers**: Scripts to assist in calculating specific molecular properties derived from ORCA outputs.
+**Usage:**
+```bash
+python cgenff_charge_validator.py STR_FILE ORCA_OUT_FILE [--penalty_threshold THRESH] [--output_csv CSV_FILE] [--cluster_mol2_file MOL2_FILE --target_residue_name RESNAME]
+```
 
-Contributions and suggestions are welcome as the project develops.
+**Arguments:**
+- `STR_FILE`: Path to the CGenFF `.str` file.
+- `ORCA_OUT_FILE`: Path to the ORCA `.out` file.
+- `--penalty_threshold`: Only report atoms with penalty above this value (default: 10.0).
+- `--output_csv`: Write the report to a CSV file.
+- `--cluster_mol2_file`: MOL2 file for the full cluster (needed for offset calculation).
+- `--target_residue_name`: Residue name in the MOL2 file to determine atom index offset.
+
+**Example:**
+```bash
+python cgenff_charge_validator.py ligand.str orca.out --penalty_threshold 15 --output_csv report.csv
+python cgenff_charge_validator.py ligand.str orca_cluster.out --cluster_mol2_file cluster.mol2 --target_residue_name LIG
+```
+
+---
+
+## Requirements
+
+- Python 3.7+
+- No external dependencies (uses only standard library).
+
+---
+
+## Notes
+
+- Both scripts print warnings and errors for malformed input or mismatches.
+- `mol2_to_xyz.py` can run a built-in example for demonstration.
+- `cgenff_charge_validator.py` can handle atom index offsets for cluster calculations if provided with the appropriate MOL2 and residue name.
+
+---
+
+**Author:** Markus
